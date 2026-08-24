@@ -5,7 +5,7 @@ from .listing_prompt import build_prompt, parse_and_validate
 
 genai.configure(api_key=os.environ["GEMINI_API_KEY"])
 
-MODEL_NAME = "gemini-2.0-flash"  # free-tier friendly
+MODEL_NAME = "gemini-3.1-flash-lite"  # gemini-2.0-flash was shut down June 2026
 
 
 def generate_listing(images: list[bytes], note: str, edit_instruction: str | None = None,

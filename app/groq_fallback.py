@@ -12,7 +12,7 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 # accept ONE image per request, unlike Gemini which takes several -- so on
 # fallback we only send the first photo. Good enough for a draft the seller
 # reviews anyway.
-MODEL_NAME = "llama-3.2-11b-vision-preview"
+MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"  # llama-3.2-11b-vision-preview was decommissioned
 
 
 def generate_listing(images: list[bytes], note: str, edit_instruction: str | None = None,
