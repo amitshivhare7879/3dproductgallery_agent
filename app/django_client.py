@@ -8,7 +8,7 @@ DJANGO_PUBLISH_SECRET = os.environ["DJANGO_PUBLISH_SECRET"]
 # provided so we have a weight to work from. Adjust to match your actual
 # material + printing cost. This OVERRIDES Gemini's guess when a weight is
 # available, since it's grounded in the real print rather than a vibe check.
-PRICE_PER_GRAM_INR = float(os.environ.get("PRICE_PER_GRAM_INR", "6"))
+PRICE_PER_GRAM_INR = float(os.environ.get("PRICE_PER_GRAM_INR", "8"))
 
 
 async def publish_product(draft) -> dict:

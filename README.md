@@ -19,10 +19,17 @@ an auto-drafted product listing, reply "yes" to publish it to
 2. Send `/newbot`, give it a name, then a username ending in `bot`.
 3. Copy the token it gives you into `.env` as `TELEGRAM_BOT_TOKEN`.
 
-## 2. Gemini API key (free tier)
+## 2. Gemini API key (free tier, primary) + Groq key (free tier, fallback)
 
-Get a key at https://aistudio.google.com/apikey — the free tier's daily
-request quota comfortably covers adding a handful of products a day.
+Get a Gemini key at https://aistudio.google.com/apikey — the free tier's
+daily request quota comfortably covers adding a handful of products a day.
+
+Get a free Groq key at https://console.groq.com/keys as a backup — if
+Gemini errors or rate-limits, the bot automatically retries the same request
+through Groq's vision model instead of failing outright. Groq's vision
+model only accepts one image per request (vs. Gemini's several), so on
+fallback only your first photo is used — fine for a draft you'll review
+anyway.
 
 ## 3. Deploy the FastAPI service (free — Render)
 

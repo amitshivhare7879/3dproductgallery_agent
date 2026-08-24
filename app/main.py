@@ -2,7 +2,7 @@ import os
 import tempfile
 from fastapi import FastAPI, Request, Response
 
-from . import telegram, gemini, stl_utils, django_client
+from . import telegram, listing, stl_utils, django_client
 from .state import get_draft, clear_draft
 
 app = FastAPI()
@@ -101,9 +101,13 @@ async def receive_update(request: Request):
 
             # Otherwise treat it as an edit instruction
             images_bytes = [open(p, "rb").read() for p in draft.images]
-            draft.generated = gemini.generate_listing(
-                images_bytes, draft.note, edit_instruction=text, previous=draft.generated
-            )
+            try:
+                draft.generated = listing.generate_listing(
+                    images_bytes, draft.note, edit_instruction=text, previous=draft.generated
+                )
+            except Exception:
+                await telegram.send_text(chat_id, "Both AI providers failed just now — try that change again in a moment.")
+                return {"ok": True}
             await telegram.send_text(chat_id, _format_summary(draft.generated, draft.stl_stats))
             return {"ok": True}
 
@@ -114,7 +118,11 @@ async def receive_update(request: Request):
 
         draft.note = text
         images_bytes = [open(p, "rb").read() for p in draft.images]
-        draft.generated = gemini.generate_listing(images_bytes, draft.note)
+        try:
+            draft.generated = listing.generate_listing(images_bytes, draft.note)
+        except Exception:
+            await telegram.send_text(chat_id, "Both AI providers failed just now — send your description again in a moment.")
+            return {"ok": True}
         draft.status = "awaiting_confirmation"
         await telegram.send_text(chat_id, _format_summary(draft.generated, draft.stl_stats))
         return {"ok": True}
