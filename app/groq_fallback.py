@@ -16,13 +16,13 @@ MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"  # llama-3.2-11b-vision
 
 
 def generate_listing(images: list[bytes], note: str, edit_instruction: str | None = None,
-                      previous: dict | None = None) -> dict:
+                      previous: dict | None = None, model_stats: dict | None = None) -> dict:
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY not set -- cannot use Groq fallback")
     if not images:
         raise RuntimeError("Groq fallback needs at least one image")
 
-    prompt = build_prompt(note, edit_instruction, previous)
+    prompt = build_prompt(note, edit_instruction, previous, model_stats)
     b64_image = base64.b64encode(images[0]).decode("utf-8")
 
     payload = {

@@ -2,7 +2,7 @@ import os
 import tempfile
 from fastapi import FastAPI, Request, Response
 
-from . import telegram, listing, stl_utils, django_client
+from . import telegram, listing, model_utils, pricing, django_client
 from .state import get_draft, clear_draft
 
 app = FastAPI()
@@ -67,24 +67,31 @@ async def _handle_message(msg: dict, chat_id: int):
         draft.images.append(path)
         await telegram.send_text(
             chat_id,
-            f"Got photo #{len(draft.images)}. Send more, the STL file, "
+            f"Got photo #{len(draft.images)}. Send more, the STL/3MF file, "
             f"or a short description whenever you're ready.",
         )
         return {"ok": True}
 
-    # --- STL file received (sent as a Document in Telegram) ---
-    if "document" in msg and msg["document"]["file_name"].lower().endswith(".stl"):
+    # --- 3D model file received (STL or 3MF, sent as a Document in Telegram) ---
+    if "document" in msg and msg["document"]["file_name"].lower().endswith((".stl", ".3mf")):
+        filename = msg["document"]["file_name"]
         file_id = msg["document"]["file_id"]
         media_bytes = await telegram.download_file(file_id)
-        fd, path = tempfile.mkstemp(suffix=".stl")
+        suffix = ".3mf" if filename.lower().endswith(".3mf") else ".stl"
+        fd, path = tempfile.mkstemp(suffix=suffix)
         with os.fdopen(fd, "wb") as f:
             f.write(media_bytes)
         draft.stl_path = path
-        draft.stl_stats = stl_utils.analyze_stl(path)
+        try:
+            draft.stl_stats = model_utils.analyze_model(path, filename)
+        except Exception as e:
+            await telegram.send_text(chat_id, f"Couldn't read that 3D file: {e}")
+            return {"ok": True}
         stats = draft.stl_stats
+        w, d, h = stats["dims_cm"]
         await telegram.send_text(
             chat_id,
-            f"Got the STL. Dimensions ~{stats['dims_cm']} cm, "
+            f"Got the {suffix.upper().lstrip('.')} file. Dimensions {w} x {d} x {h} cm, "
             f"estimated weight ~{stats['weight_g']}g. Send a short description "
             f"when ready, e.g. 'red dragon miniature, fantasy category'.",
         )
@@ -119,7 +126,8 @@ async def _handle_message(msg: dict, chat_id: int):
             images_bytes = [open(p, "rb").read() for p in draft.images]
             try:
                 draft.generated = listing.generate_listing(
-                    images_bytes, draft.note, edit_instruction=text, previous=draft.generated
+                    images_bytes, draft.note, edit_instruction=text, previous=draft.generated,
+                    model_stats=draft.stl_stats,
                 )
             except Exception:
                 await telegram.send_text(chat_id, "Both AI providers failed just now — try that change again in a moment.")
@@ -135,7 +143,7 @@ async def _handle_message(msg: dict, chat_id: int):
         draft.note = text
         images_bytes = [open(p, "rb").read() for p in draft.images]
         try:
-            draft.generated = listing.generate_listing(images_bytes, draft.note)
+            draft.generated = listing.generate_listing(images_bytes, draft.note, model_stats=draft.stl_stats)
         except Exception:
             await telegram.send_text(chat_id, "Both AI providers failed just now — send your description again in a moment.")
             return {"ok": True}
@@ -147,13 +155,20 @@ async def _handle_message(msg: dict, chat_id: int):
 
 
 def _format_summary(gen: dict, stl_stats: dict | None = None) -> str:
+    price = pricing.compute_price(stl_stats, gen.get("suggested_price"))
+
     if stl_stats and stl_stats.get("weight_g"):
-        price_line = f"Price: computed from STL weight (~{stl_stats['weight_g']}g) at publish time"
+        w, d, h = stl_stats["dims_cm"]
+        dims_line = f"Dimensions: {w} x {d} x {h} cm | Weight: ~{stl_stats['weight_g']}g\n"
+        price_line = f"Price: ₹{price} (computed from print weight)"
     else:
-        price_line = f"Suggested price: ₹{gen.get('suggested_price')} (Gemini's guess, no STL weight to go on)"
+        dims_line = ""
+        price_line = f"Suggested price: ₹{price} (AI's guess, no 3D file to go on)"
+
     return (
         f"*{gen.get('name')}*\n"
         f"{gen.get('description')}\n\n"
+        f"{dims_line}"
         f"Category: {gen.get('category')}\n"
         f"{price_line}\n\n"
         f"Reply 'yes' to publish, or describe a change (e.g. 'change price to 899')."

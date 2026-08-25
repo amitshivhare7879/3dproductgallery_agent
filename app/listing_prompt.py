@@ -11,20 +11,21 @@ attached photo(s) and the seller's short note, produce a JSON object with
 exactly these fields:
 
 - name: short, catchy product name (max 100 chars)
-- description: 2-4 sentence customer-facing description
+- description: 2-4 sentence customer-facing description. {dims_instruction}
 - category: MUST be exactly one of: {categories}
 - suggested_price: your best-guess price in INR (integer, no currency symbol)
-  based on what similar 3D-printed items sell for -- this is a rough starting
-  point, the seller will confirm or adjust it.
+  based on what similar 3D-printed items sell for. {price_instruction}
 
 Seller's note: "{note}"
+{model_info}
 {extra}
 
 Respond with ONLY the JSON object, no markdown fences, no extra text.
 """
 
 
-def build_prompt(note: str, edit_instruction: str | None, previous: dict | None) -> str:
+def build_prompt(note: str, edit_instruction: str | None, previous: dict | None,
+                  model_stats: dict | None = None) -> str:
     extra = ""
     if edit_instruction and previous:
         extra = (
@@ -32,10 +33,35 @@ def build_prompt(note: str, edit_instruction: str | None, previous: dict | None)
             f"They want this change applied: \"{edit_instruction}\"\n"
             f"Return the full updated JSON object with that change incorporated."
         )
+
+    if model_stats and model_stats.get("dims_cm"):
+        w, d, h = model_stats["dims_cm"]
+        model_info = (
+            f"\nMeasured from the actual 3D model file: dimensions are "
+            f"{w} x {d} x {h} cm (W x D x H), estimated print weight "
+            f"{model_stats.get('weight_g', '?')}g."
+        )
+        dims_instruction = (
+            f"You MUST mention the exact dimensions ({w} x {d} x {h} cm) "
+            f"naturally in the description."
+        )
+        price_instruction = (
+            "A price will be calculated separately from the actual print "
+            "weight, so this field is just a fallback -- still give your "
+            "best estimate."
+        )
+    else:
+        model_info = ""
+        dims_instruction = "No 3D file was provided, so do not state specific dimensions."
+        price_instruction = "No weight data is available, so this estimate will be used directly."
+
     return PROMPT_TEMPLATE.format(
         categories=", ".join(CATEGORY_CHOICES),
         note=note or "(no note given)",
         extra=extra,
+        model_info=model_info,
+        dims_instruction=dims_instruction,
+        price_instruction=price_instruction,
     )
 
 

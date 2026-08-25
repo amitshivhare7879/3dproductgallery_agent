@@ -9,8 +9,8 @@ MODEL_NAME = "gemini-3.1-flash-lite"  # gemini-2.0-flash was shut down June 2026
 
 
 def generate_listing(images: list[bytes], note: str, edit_instruction: str | None = None,
-                      previous: dict | None = None) -> dict:
-    prompt = build_prompt(note, edit_instruction, previous)
+                      previous: dict | None = None, model_stats: dict | None = None) -> dict:
+    prompt = build_prompt(note, edit_instruction, previous, model_stats)
 
     model = genai.GenerativeModel(MODEL_NAME)
     parts = [prompt] + [{"mime_type": "image/jpeg", "data": img} for img in images]
