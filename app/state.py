@@ -15,8 +15,9 @@ class ProductDraft:
     stl_path: Optional[str] = None
     stl_stats: Optional[dict] = None                   # weight_g, dims_cm, volume_cm3
     note: Optional[str] = None                          # freeform text from user
-    generated: Optional[dict] = None                    # Gemini output (title, description, etc.)
-    status: str = "collecting"                          # collecting | awaiting_confirmation
+    generated: Optional[dict] = None                    # AI output (name, description, etc.)
+    status: str = "collecting"                          # collecting | awaiting_confirmation | editing | confirming_delete
+    edit_target_id: Optional[int] = None                 # set when editing/deleting an existing product
 
 
 _drafts: dict[str, ProductDraft] = {}

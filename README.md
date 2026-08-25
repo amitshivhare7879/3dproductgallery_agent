@@ -7,11 +7,21 @@ an auto-drafted product listing, reply "yes" to publish it to
 ## How a product gets added (once live)
 
 1. Send 1+ product photos to the bot
-2. Send the `.stl` file
+2. Send the `.stl` or `.3mf` file
 3. Send a short text note, e.g. "red dragon miniature, fantasy category"
-4. Bot replies with a generated title/description/SEO/category/tags
+4. Bot replies with a generated name/description (with real dimensions
+   baked in)/category/price
 5. Reply `yes` to publish, or type a change (e.g. "make it cheaper") to edit,
    or `cancel` to discard
+
+## Managing existing products
+
+- `/list` — shows your last 20 products with id, name, price, category.
+  `/list dragon` searches by name.
+- `/edit <id>` — pulls up an existing product. Tell it what to change
+  ("change price to 999", "update description to ...") or send a new photo
+  to replace the image, then reply `yes` to save.
+- `/delete <id>` — asks for confirmation, then deletes the product.
 
 ## 1. Create the bot (free, ~1 minute)
 

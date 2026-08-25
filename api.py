@@ -11,7 +11,7 @@ import os
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_POST, require_GET
 
 PUBLISH_SECRET = os.environ["DJANGO_PUBLISH_SECRET"]
 
@@ -85,3 +85,60 @@ def edit_product_api(request, product_id):
         ProductImage.objects.create(product=product, image=f)
 
     return JsonResponse({"ok": True, "product_id": product.id, "url": f"/product/{product.slug}/"})
+
+
+@csrf_exempt
+@require_GET
+def get_product_api(request, product_id):
+    if not _check_secret(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+
+    from .models import Product
+
+    product = get_object_or_404(Product, id=product_id)
+    return JsonResponse({
+        "ok": True,
+        "id": product.id,
+        "name": product.name,
+        "description": product.description,
+        "price": str(product.price),
+        "category": product.category,
+        "stock": product.stock,
+    })
+
+
+@csrf_exempt
+@require_POST
+def delete_product_api(request, product_id):
+    if not _check_secret(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+
+    from .models import Product
+
+    product = get_object_or_404(Product, id=product_id)
+    name = product.name
+    product.delete()
+    return JsonResponse({"ok": True, "deleted_id": product_id, "deleted_name": name})
+
+
+@csrf_exempt
+@require_GET
+def list_products_api(request):
+    if not _check_secret(request):
+        return JsonResponse({"error": "unauthorized"}, status=401)
+
+    from .models import Product
+
+    query = request.GET.get("q", "").strip()
+    qs = Product.objects.all().order_by("-created_at")
+    if query:
+        qs = qs.filter(name__icontains=query)
+    qs = qs[:20]
+
+    return JsonResponse({
+        "ok": True,
+        "products": [
+            {"id": p.id, "name": p.name, "price": str(p.price), "category": p.category}
+            for p in qs
+        ],
+    })
