@@ -1,10 +1,14 @@
+import logging
 import os
+import re
 import tempfile
+
 from fastapi import FastAPI, Request, Response
 
 from . import telegram, listing, model_utils, pricing, django_client
-from .state import get_draft, clear_draft
+from .state import get_draft, clear_draft, persist
 
+log = logging.getLogger(__name__)
 app = FastAPI()
 
 # Optional but recommended: set this to a random string, and pass the same
@@ -21,6 +25,20 @@ ALLOWED_SENDERS = {s for s in os.environ.get("ALLOWED_SENDERS", "").split(",") i
 CONFIRM_WORDS = {"yes", "confirm", "publish", "ok", "okay"}
 CANCEL_WORDS = {"no", "cancel", "stop"}
 
+TELEGRAM_MAX_BYTES = 20 * 1024 * 1024  # hard limit on Telegram's Bot API
+
+HELP_TEXT = (
+    "*Add a new product:*\n"
+    "Send photo(s), optionally an .stl/.3mf file and a video, then a short "
+    "description. Reply 'yes' to publish.\n\n"
+    "*Manage existing products:*\n"
+    "/list [search] — see products with their IDs\n"
+    "/edit <id> — change an existing product\n"
+    "/delete <id> — remove a product\n\n"
+    "*If something breaks:*\n"
+    "/reset — clears whatever's in progress and starts clean"
+)
+
 
 @app.post("/webhook")
 async def receive_update(request: Request):
@@ -29,17 +47,30 @@ async def receive_update(request: Request):
         if header != WEBHOOK_SECRET:
             return Response(status_code=403)
 
-    body = await request.json()
-    msg = body.get("message")
-    if not msg:
-        return {"ok": True}  # edited messages, other update types -> ignore
-
-    chat_id = msg["chat"]["id"]
+    chat_id = None
     try:
-        return await _handle_message(msg, chat_id)
+        body = await request.json()
+        msg = body.get("message")
+        if not msg:
+            return {"ok": True}  # edited messages, other update types -> ignore
+        chat_id = msg["chat"]["id"]
+        result = await _handle_message(msg, chat_id)
+        persist()
+        return result
     except Exception as e:
-        # Last-resort safety net: never let an unhandled crash go silent.
-        await telegram.send_text(chat_id, f"Something went wrong: {e}")
+        # Last-resort safety net: NOTHING should ever go unanswered or leave
+        # the bot stuck. Log it, tell the user, always return 200 to Telegram
+        # (so it doesn't endlessly retry the same failing update).
+        log.exception("Unhandled error in webhook")
+        if chat_id is not None:
+            try:
+                await telegram.send_text(
+                    chat_id,
+                    f"Something went wrong: {e}\n\nSend /reset if the bot seems stuck.",
+                )
+            except Exception:
+                log.exception("Even the error message failed to send")
+        persist()
         return {"ok": True}
 
 
@@ -56,11 +87,24 @@ async def _handle_message(msg: dict, chat_id: int):
 
     draft = get_draft(sender)
 
+    # --- /reset works ALWAYS, regardless of what state the draft is in ---
+    if "text" in msg and msg["text"].strip().lower() == "/reset":
+        clear_draft(sender)
+        await telegram.send_text(chat_id, "Reset. Send photos to start a new product, or /list to manage existing ones.")
+        return {"ok": True}
+
+    if "text" in msg and msg["text"].strip().lower() in ("/start", "/help"):
+        await telegram.send_text(chat_id, HELP_TEXT)
+        return {"ok": True}
+
     # --- Photo received: stash it and keep collecting ---
     if "photo" in msg:
-        # Telegram sends multiple sizes; the last one is the largest.
-        file_id = msg["photo"][-1]["file_id"]
-        media_bytes = await telegram.download_file(file_id)
+        file_id = msg["photo"][-1]["file_id"]  # last = largest size
+        try:
+            media_bytes = await telegram.download_file(file_id)
+        except Exception as e:
+            await telegram.send_text(chat_id, f"Couldn't download that photo: {e}")
+            return {"ok": True}
         fd, path = tempfile.mkstemp(suffix=".jpg")
         with os.fdopen(fd, "wb") as f:
             f.write(media_bytes)
@@ -68,15 +112,27 @@ async def _handle_message(msg: dict, chat_id: int):
         await telegram.send_text(
             chat_id,
             f"Got photo #{len(draft.images)}. Send more, the STL/3MF file, "
-            f"or a short description whenever you're ready.",
+            f"a product video, or a short description whenever you're ready.",
         )
         return {"ok": True}
 
-    # --- 3D model file received (STL or 3MF, sent as a Document in Telegram) ---
+    # --- 3D model file received (STL or 3MF, sent as a Document) ---
     if "document" in msg and msg["document"]["file_name"].lower().endswith((".stl", ".3mf")):
         filename = msg["document"]["file_name"]
         file_id = msg["document"]["file_id"]
-        media_bytes = await telegram.download_file(file_id)
+        file_size = msg["document"].get("file_size", 0)
+
+        size_error = _check_telegram_size(file_size)
+        if size_error:
+            await telegram.send_text(chat_id, size_error)
+            return {"ok": True}
+
+        try:
+            media_bytes = await telegram.download_file(file_id)
+        except Exception as e:
+            await telegram.send_text(chat_id, f"Couldn't download that file from Telegram: {e}")
+            return {"ok": True}
+
         suffix = ".3mf" if filename.lower().endswith(".3mf") else ".stl"
         fd, path = tempfile.mkstemp(suffix=suffix)
         with os.fdopen(fd, "wb") as f:
@@ -97,6 +153,40 @@ async def _handle_message(msg: dict, chat_id: int):
         )
         return {"ok": True}
 
+    # --- Product video received (as a native video message OR a video file) ---
+    is_video_doc = "document" in msg and (
+        msg["document"].get("mime_type", "").startswith("video/")
+        or msg["document"]["file_name"].lower().endswith((".mp4", ".mov", ".webm", ".avi"))
+    )
+    if "video" in msg or is_video_doc:
+        if "video" in msg:
+            file_id = msg["video"]["file_id"]
+            file_size = msg["video"].get("file_size", 0)
+        else:
+            file_id = msg["document"]["file_id"]
+            file_size = msg["document"].get("file_size", 0)
+
+        size_error = _check_telegram_size(file_size)
+        if size_error:
+            await telegram.send_text(chat_id, size_error)
+            return {"ok": True}
+
+        try:
+            media_bytes = await telegram.download_file(file_id)
+        except Exception as e:
+            await telegram.send_text(chat_id, f"Couldn't download that video: {e}")
+            return {"ok": True}
+
+        fd, path = tempfile.mkstemp(suffix=".mp4")
+        with os.fdopen(fd, "wb") as f:
+            f.write(media_bytes)
+        draft.video_path = path
+        await telegram.send_text(
+            chat_id,
+            "Got the product video. Send photos/STL/description whenever you're ready.",
+        )
+        return {"ok": True}
+
     # --- Text message ---
     if "text" in msg:
         text = msg["text"].strip()
@@ -105,7 +195,11 @@ async def _handle_message(msg: dict, chat_id: int):
         # --- Commands for managing EXISTING products, available any time ---
         if lower == "/list" or lower.startswith("/list "):
             query = text[6:].strip() if len(text) > 5 else ""
-            result = await django_client.list_products(query)
+            try:
+                result = await django_client.list_products(query)
+            except Exception as e:
+                await telegram.send_text(chat_id, f"Couldn't fetch product list: {e}")
+                return {"ok": True}
             products = result.get("products", [])
             if not products:
                 await telegram.send_text(chat_id, "No products found.")
@@ -139,7 +233,7 @@ async def _handle_message(msg: dict, chat_id: int):
                 chat_id,
                 f"Editing #{product_id}: *{product['name']}* — ₹{product['price']} ({product['category']})\n\n"
                 f"Tell me what to change (e.g. 'change price to 999', 'update description to ...'), "
-                f"send new photos to replace the image, or reply 'cancel'.",
+                f"send new photos/video to replace them, or reply 'cancel'.",
             )
             return {"ok": True}
 
@@ -193,7 +287,7 @@ async def _handle_message(msg: dict, chat_id: int):
 
             try:
                 if draft.images:
-                    images_bytes = [open(p, "rb").read() for p in draft.images]
+                    images_bytes = _read_files(draft.images)
                     draft.generated = listing.generate_listing(
                         images_bytes, text, edit_instruction=text, previous=draft.generated,
                         model_stats=draft.stl_stats,
@@ -203,10 +297,14 @@ async def _handle_message(msg: dict, chat_id: int):
             except Exception as e:
                 await telegram.send_text(chat_id, str(e) or "Couldn't process that change — try rephrasing it.")
                 return {"ok": True}
-            await telegram.send_text(chat_id, _format_summary(draft.generated, draft.stl_stats) + "\n\n(Editing existing product — reply 'yes' to save.)")
+            await telegram.send_text(
+                chat_id,
+                _format_summary(draft.generated, draft.stl_stats, draft.video_path)
+                + "\n\n(Editing existing product — reply 'yes' to save.)",
+            )
             return {"ok": True}
 
-        # Case 1: awaiting confirmation on an already-generated draft
+        # --- Awaiting confirmation on an already-generated new-product draft ---
         if draft.status == "awaiting_confirmation":
             if lower in CONFIRM_WORDS:
                 try:
@@ -227,7 +325,7 @@ async def _handle_message(msg: dict, chat_id: int):
                 return {"ok": True}
 
             # Otherwise treat it as an edit instruction
-            images_bytes = [open(p, "rb").read() for p in draft.images]
+            images_bytes = _read_files(draft.images)
             try:
                 draft.generated = listing.generate_listing(
                     images_bytes, draft.note, edit_instruction=text, previous=draft.generated,
@@ -236,30 +334,52 @@ async def _handle_message(msg: dict, chat_id: int):
             except Exception:
                 await telegram.send_text(chat_id, "Both AI providers failed just now — try that change again in a moment.")
                 return {"ok": True}
-            await telegram.send_text(chat_id, _format_summary(draft.generated, draft.stl_stats))
+            await telegram.send_text(chat_id, _format_summary(draft.generated, draft.stl_stats, draft.video_path))
             return {"ok": True}
 
-        # Case 2: this text is the product note -> generate the draft now
+        # --- This text is the product note -> generate the draft now ---
         if not draft.images:
             await telegram.send_text(
                 chat_id,
                 "Send at least one product photo first, then your description.\n\n"
-                "(Or use /list, /edit <id>, /delete <id> to manage existing products.)",
+                "(Or /list, /edit <id>, /delete <id> to manage existing products, /help for everything.)",
             )
             return {"ok": True}
 
         draft.note = text
-        images_bytes = [open(p, "rb").read() for p in draft.images]
+        images_bytes = _read_files(draft.images)
         try:
             draft.generated = listing.generate_listing(images_bytes, draft.note, model_stats=draft.stl_stats)
         except Exception:
             await telegram.send_text(chat_id, "Both AI providers failed just now — send your description again in a moment.")
             return {"ok": True}
         draft.status = "awaiting_confirmation"
-        await telegram.send_text(chat_id, _format_summary(draft.generated, draft.stl_stats))
+        await telegram.send_text(chat_id, _format_summary(draft.generated, draft.stl_stats, draft.video_path))
         return {"ok": True}
 
     return {"ok": True}
+
+
+def _check_telegram_size(file_size: int) -> str | None:
+    """Returns an error message if the file exceeds Telegram's bot download
+    limit, else None. Checked upfront using Telegram's own reported size,
+    to avoid a confusing 400 error from actually attempting the download."""
+    if file_size and file_size > TELEGRAM_MAX_BYTES:
+        mb = file_size / (1024 * 1024)
+        return (
+            f"That file is {mb:.1f}MB — Telegram's bot API only allows downloading "
+            f"files up to 20MB. Try re-exporting with a lower mesh resolution/"
+            f"compression, or split it, and send that instead."
+        )
+    return None
+
+
+def _read_files(paths: list[str]) -> list[bytes]:
+    data = []
+    for p in paths:
+        with open(p, "rb") as f:
+            data.append(f.read())
+    return data
 
 
 def _apply_text_edit_without_ai(current: dict, instruction: str) -> dict:
@@ -271,18 +391,16 @@ def _apply_text_edit_without_ai(current: dict, instruction: str) -> dict:
     updated = dict(current or {})
     lower = instruction.lower()
 
-    import re
     price_match = re.search(r"price\s*(?:to|=|:)?\s*₹?\s*(\d+(?:\.\d+)?)", lower)
     if price_match:
         updated["suggested_price"] = float(price_match.group(1))
         return updated
 
-    for field, keyword in [("name", "name"), ("description", "description"), ("category", "category")]:
+    for field_name, keyword in [("name", "name"), ("description", "description"), ("category", "category")]:
         if keyword in lower:
-            # take everything after "to"/":" as the new value
             parts = re.split(r"\bto\b|:", instruction, maxsplit=1, flags=re.IGNORECASE)
             if len(parts) == 2:
-                updated[field] = parts[1].strip()
+                updated[field_name] = parts[1].strip()
                 return updated
 
     raise ValueError(
@@ -291,7 +409,7 @@ def _apply_text_edit_without_ai(current: dict, instruction: str) -> dict:
     )
 
 
-def _format_summary(gen: dict, stl_stats: dict | None = None) -> str:
+def _format_summary(gen: dict, stl_stats: dict | None = None, video_path: str | None = None) -> str:
     price = pricing.compute_price(stl_stats, gen.get("suggested_price"))
 
     if stl_stats and stl_stats.get("weight_g"):
@@ -302,10 +420,13 @@ def _format_summary(gen: dict, stl_stats: dict | None = None) -> str:
         dims_line = ""
         price_line = f"Suggested price: ₹{price} (AI's guess, no 3D file to go on)"
 
+    video_line = "Video: attached\n" if video_path else ""
+
     return (
         f"*{gen.get('name')}*\n"
         f"{gen.get('description')}\n\n"
         f"{dims_line}"
+        f"{video_line}"
         f"Category: {gen.get('category')}\n"
         f"{price_line}\n\n"
         f"Reply 'yes' to publish, or describe a change (e.g. 'change price to 899')."

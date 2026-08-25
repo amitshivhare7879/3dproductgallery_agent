@@ -7,6 +7,25 @@ DJANGO_API_BASE_URL = os.environ["DJANGO_API_BASE_URL"]
 DJANGO_PUBLISH_SECRET = os.environ["DJANGO_PUBLISH_SECRET"]
 
 
+def _build_files(draft) -> list:
+    """
+    Reads image/video files fully into memory (fine at these small sizes)
+    instead of passing open file handles to httpx -- avoids leaking file
+    descriptors across requests, since nothing was closing them before.
+    """
+    files = []
+    if draft.images:
+        with open(draft.images[0], "rb") as f:
+            files.append(("image", ("main.jpg", f.read(), "image/jpeg")))
+        for i, path in enumerate(draft.images[1:]):
+            with open(path, "rb") as f:
+                files.append(("gallery_images", (f"image_{i}.jpg", f.read(), "image/jpeg")))
+    if getattr(draft, "video_path", None):
+        with open(draft.video_path, "rb") as f:
+            files.append(("video", ("product.mp4", f.read(), "video/mp4")))
+    return files
+
+
 async def publish_product(draft) -> dict:
     """
     Sends the finished draft to the Django site's internal publish endpoint.
@@ -26,13 +45,7 @@ async def publish_product(draft) -> dict:
         "category": gen.get("category"),
         "price": price,
     }
-
-    files = []
-    if draft.images:
-        # First photo -> Product.image, any additional ones -> ProductImage gallery
-        files.append(("image", ("main.jpg", open(draft.images[0], "rb"), "image/jpeg")))
-        for i, path in enumerate(draft.images[1:]):
-            files.append(("gallery_images", (f"image_{i}.jpg", open(path, "rb"), "image/jpeg")))
+    files = _build_files(draft)
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
         r = await client.post(url, headers=headers, data=data, files=files, timeout=60)
@@ -74,11 +87,7 @@ async def edit_product(product_id: int, draft) -> dict:
     if gen.get("suggested_price") is not None or stats.get("weight_g"):
         data["price"] = compute_price(stats, gen.get("suggested_price"))
 
-    files = []
-    if draft.images:
-        files.append(("image", ("main.jpg", open(draft.images[0], "rb"), "image/jpeg")))
-        for i, path in enumerate(draft.images[1:]):
-            files.append(("gallery_images", (f"image_{i}.jpg", open(path, "rb"), "image/jpeg")))
+    files = _build_files(draft)
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
         r = await client.post(url, headers=headers, data=data, files=files, timeout=60)

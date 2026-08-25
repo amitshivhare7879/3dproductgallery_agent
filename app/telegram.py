@@ -7,12 +7,25 @@ FILE_BASE = f"https://api.telegram.org/file/bot{TOKEN}"
 
 
 async def send_text(chat_id: int, text: str) -> None:
+    """
+    Sends a message with Markdown formatting. If Telegram rejects it (e.g.
+    unescaped special characters in dynamic content like error messages),
+    falls back to plain text so the user still gets SOMETHING instead of
+    the send itself silently failing.
+    """
     async with httpx.AsyncClient() as client:
         r = await client.post(
             f"{API_BASE}/sendMessage",
             json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
             timeout=30,
         )
+        if r.status_code == 400:
+            # Likely a Markdown parse error from special characters -- retry plain.
+            r = await client.post(
+                f"{API_BASE}/sendMessage",
+                json={"chat_id": chat_id, "text": text},
+                timeout=30,
+            )
         r.raise_for_status()
 
 

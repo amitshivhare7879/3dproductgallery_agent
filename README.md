@@ -7,12 +7,25 @@ an auto-drafted product listing, reply "yes" to publish it to
 ## How a product gets added (once live)
 
 1. Send 1+ product photos to the bot
-2. Send the `.stl` or `.3mf` file
-3. Send a short text note, e.g. "red dragon miniature, fantasy category"
-4. Bot replies with a generated name/description (with real dimensions
+2. Send the `.stl` or `.3mf` file (optional — max 20MB, Telegram's bot limit)
+3. Send a product video (optional — same 20MB limit)
+4. Send a short text note, e.g. "red dragon miniature, fantasy category"
+5. Bot replies with a generated name/description (with real dimensions
    baked in)/category/price
-5. Reply `yes` to publish, or type a change (e.g. "make it cheaper") to edit,
+6. Reply `yes` to publish, or type a change (e.g. "make it cheaper") to edit,
    or `cancel` to discard
+
+## Reliability
+
+- `/reset` clears whatever's in progress — use this if the bot ever seems
+  stuck or unresponsive.
+- `/help` shows all commands.
+- Every message is wrapped in error handling — a crash anywhere sends you a
+  message explaining what broke instead of going silent.
+- In-progress drafts are saved to disk after every message, so if the free
+  Render instance restarts mid-flow (e.g. waking from sleep), you don't lose
+  your progress. This does NOT survive a fresh deploy — only mid-session
+  restarts.
 
 ## Managing existing products
 
@@ -20,7 +33,7 @@ an auto-drafted product listing, reply "yes" to publish it to
   `/list dragon` searches by name.
 - `/edit <id>` — pulls up an existing product. Tell it what to change
   ("change price to 999", "update description to ...") or send a new photo
-  to replace the image, then reply `yes` to save.
+  or video to replace it, then reply `yes` to save.
 - `/delete <id>` — asks for confirmation, then deletes the product.
 
 ## 1. Create the bot (free, ~1 minute)
