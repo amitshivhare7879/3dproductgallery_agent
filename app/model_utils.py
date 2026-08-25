@@ -54,58 +54,73 @@ def _parse_stl(path: str) -> tuple[tuple[float, float, float], float]:
 
 def _parse_3mf(path: str) -> tuple[tuple[float, float, float], float]:
     """
-    A .3mf file is a zip archive; the mesh geometry lives in
-    3D/3dmodel.model as XML (<mesh><vertices>/<triangles></mesh>).
-    This ignores per-object <transform> matrices for simplicity -- fine for
-    a rough dimension/weight estimate, not exact for scaled/rotated parts.
-    """
-    with zipfile.ZipFile(path) as z:
-        with z.open("3D/3dmodel.model") as f:
-            tree = ET.parse(f)
+    A .3mf file is a zip archive. Simple single-part 3MF files have their
+    mesh directly in 3D/3dmodel.model, but many slicer/CAD exports (Bambu
+    Studio, PrusaSlicer, Fusion360, etc.) split each object into its own
+    file under 3D/Objects/*.model and reference them from the root model.
+    This scans EVERY .model file in the archive and combines whatever mesh
+    geometry it finds, so both layouts work.
 
-    root = tree.getroot()
-    # Namespace varies by 3MF version -- match any element ending in the
-    # right local tag name instead of hardcoding the namespace URI.
+    Ignores per-object <transform> matrices for simplicity -- fine for a
+    rough dimension/weight estimate, not exact for scaled/rotated parts.
+    """
     def local(tag):
         return tag.rsplit("}", 1)[-1]
 
-    all_vertices = []
     all_min = np.array([np.inf, np.inf, np.inf])
     all_max = np.array([-np.inf, -np.inf, -np.inf])
     total_volume_mm3 = 0.0
+    found_any = False
 
-    for mesh_el in root.iter():
-        if local(mesh_el.tag) != "mesh":
-            continue
+    with zipfile.ZipFile(path) as z:
+        model_files = [n for n in z.namelist() if n.lower().endswith(".model")]
+        if not model_files:
+            raise ValueError("No .model files found inside the 3MF archive")
 
-        verts = []
-        for vertices_el in mesh_el:
-            if local(vertices_el.tag) != "vertices":
-                continue
-            for v in vertices_el:
-                if local(v.tag) != "vertex":
+        for name in model_files:
+            try:
+                with z.open(name) as f:
+                    tree = ET.parse(f)
+            except ET.ParseError:
+                continue  # skip any malformed/unrelated file rather than failing the whole thing
+
+            root = tree.getroot()
+            for mesh_el in root.iter():
+                if local(mesh_el.tag) != "mesh":
                     continue
-                verts.append((float(v.get("x")), float(v.get("y")), float(v.get("z"))))
-        verts_arr = np.array(verts)
-        if len(verts_arr) == 0:
-            continue
 
-        all_min = np.minimum(all_min, verts_arr.min(axis=0))
-        all_max = np.maximum(all_max, verts_arr.max(axis=0))
-
-        for triangles_el in mesh_el:
-            if local(triangles_el.tag) != "triangles":
-                continue
-            for t in triangles_el:
-                if local(t.tag) != "triangle":
+                verts = []
+                for vertices_el in mesh_el:
+                    if local(vertices_el.tag) != "vertices":
+                        continue
+                    for v in vertices_el:
+                        if local(v.tag) != "vertex":
+                            continue
+                        verts.append((float(v.get("x")), float(v.get("y")), float(v.get("z"))))
+                verts_arr = np.array(verts)
+                if len(verts_arr) == 0:
                     continue
-                v1, v2, v3 = int(t.get("v1")), int(t.get("v2")), int(t.get("v3"))
-                p1, p2, p3 = verts_arr[v1], verts_arr[v2], verts_arr[v3]
-                # Signed tetrahedron volume relative to the origin
-                total_volume_mm3 += np.dot(p1, np.cross(p2, p3)) / 6.0
 
-    if not np.isfinite(all_min).all():
-        raise ValueError("No mesh geometry found in 3MF file")
+                found_any = True
+                all_min = np.minimum(all_min, verts_arr.min(axis=0))
+                all_max = np.maximum(all_max, verts_arr.max(axis=0))
+
+                for triangles_el in mesh_el:
+                    if local(triangles_el.tag) != "triangles":
+                        continue
+                    for t in triangles_el:
+                        if local(t.tag) != "triangle":
+                            continue
+                        v1, v2, v3 = int(t.get("v1")), int(t.get("v2")), int(t.get("v3"))
+                        p1, p2, p3 = verts_arr[v1], verts_arr[v2], verts_arr[v3]
+                        # Signed tetrahedron volume relative to the origin
+                        total_volume_mm3 += np.dot(p1, np.cross(p2, p3)) / 6.0
+
+    if not found_any:
+        raise ValueError(
+            "No mesh geometry found in any part of this 3MF file -- it may use an "
+            "unsupported/encrypted format. Try exporting as .stl instead."
+        )
 
     dims_mm = tuple(float(d) for d in (all_max - all_min))
     return dims_mm, total_volume_mm3
