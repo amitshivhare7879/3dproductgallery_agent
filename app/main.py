@@ -35,6 +35,15 @@ async def receive_update(request: Request):
         return {"ok": True}  # edited messages, other update types -> ignore
 
     chat_id = msg["chat"]["id"]
+    try:
+        return await _handle_message(msg, chat_id)
+    except Exception as e:
+        # Last-resort safety net: never let an unhandled crash go silent.
+        await telegram.send_text(chat_id, f"Something went wrong: {e}")
+        return {"ok": True}
+
+
+async def _handle_message(msg: dict, chat_id: int):
     sender = str(msg["from"]["id"])
 
     if ALLOWED_SENDERS and sender not in ALLOWED_SENDERS:
@@ -89,7 +98,14 @@ async def receive_update(request: Request):
         # Case 1: awaiting confirmation on an already-generated draft
         if draft.status == "awaiting_confirmation":
             if lower in CONFIRM_WORDS:
-                result = await django_client.publish_product(draft)
+                try:
+                    result = await django_client.publish_product(draft)
+                except Exception as e:
+                    await telegram.send_text(
+                        chat_id,
+                        f"Publish failed: {e}\n\nThe draft is still here — reply 'yes' again once it's fixed, or 'cancel' to discard.",
+                    )
+                    return {"ok": True}
                 await telegram.send_text(chat_id, f"Published! {result.get('url', '')}")
                 clear_draft(sender)
                 return {"ok": True}
