@@ -18,6 +18,12 @@ from stl import mesh
 MATERIAL_DENSITY_G_CM3 = 1.24
 DEFAULT_INFILL_PCT = 20  # assume prints are not fully solid
 
+# Safety cap to bound memory on the free-tier host. A compressed 3MF/STL can
+# decompress or parse into something far larger in memory than its file
+# size suggests -- this stops pathologically dense meshes from OOM-crashing
+# the whole service before that happens.
+MAX_VERTICES_PER_MESH = 400_000
+
 
 def analyze_model(path: str, filename: str) -> dict:
     """Dispatches to the right parser based on file extension."""
@@ -43,6 +49,13 @@ def analyze_model(path: str, filename: str) -> dict:
 def _parse_stl(path: str) -> tuple[tuple[float, float, float], float]:
     m = mesh.Mesh.from_file(path)
 
+    if len(m.vectors) * 3 > MAX_VERTICES_PER_MESH:
+        raise ValueError(
+            f"This STL is extremely dense (over {MAX_VERTICES_PER_MESH:,} vertices). "
+            f"Please decimate/simplify it in your slicer or CAD tool before sending -- "
+            f"this is a memory safety limit on the free hosting tier, not a bug."
+        )
+
     minx, maxx = m.x.min(), m.x.max()
     miny, maxy = m.y.min(), m.y.max()
     minz, maxz = m.z.min(), m.z.max()
@@ -61,12 +74,16 @@ def _parse_3mf(path: str) -> tuple[tuple[float, float, float], float]:
     This scans EVERY .model file in the archive and combines whatever mesh
     geometry it finds, so both layouts work.
 
+    IMPORTANT: uses iterparse (streaming) instead of a full ET.parse, and
+    clears each element as it's consumed. A compressed 3MF can decompress
+    to XML many times its zip size -- building a full DOM tree for a
+    complex mesh can spike memory well past what a free-tier host allows,
+    which is what crashed the service. Streaming + an early bail-out on
+    excessive vertex count keeps peak memory bounded.
+
     Ignores per-object <transform> matrices for simplicity -- fine for a
     rough dimension/weight estimate, not exact for scaled/rotated parts.
     """
-    def local(tag):
-        return tag.rsplit("}", 1)[-1]
-
     all_min = np.array([np.inf, np.inf, np.inf])
     all_max = np.array([-np.inf, -np.inf, -np.inf])
     total_volume_mm3 = 0.0
@@ -78,43 +95,13 @@ def _parse_3mf(path: str) -> tuple[tuple[float, float, float], float]:
             raise ValueError("No .model files found inside the 3MF archive")
 
         for name in model_files:
-            try:
-                with z.open(name) as f:
-                    tree = ET.parse(f)
-            except ET.ParseError:
-                continue  # skip any malformed/unrelated file rather than failing the whole thing
-
-            root = tree.getroot()
-            for mesh_el in root.iter():
-                if local(mesh_el.tag) != "mesh":
-                    continue
-
-                verts = []
-                for vertices_el in mesh_el:
-                    if local(vertices_el.tag) != "vertices":
-                        continue
-                    for v in vertices_el:
-                        if local(v.tag) != "vertex":
-                            continue
-                        verts.append((float(v.get("x")), float(v.get("y")), float(v.get("z"))))
-                verts_arr = np.array(verts)
-                if len(verts_arr) == 0:
-                    continue
-
+            with z.open(name) as f:
+                found, vmin, vmax, volume = _parse_model_stream(f)
+            if found:
                 found_any = True
-                all_min = np.minimum(all_min, verts_arr.min(axis=0))
-                all_max = np.maximum(all_max, verts_arr.max(axis=0))
-
-                for triangles_el in mesh_el:
-                    if local(triangles_el.tag) != "triangles":
-                        continue
-                    for t in triangles_el:
-                        if local(t.tag) != "triangle":
-                            continue
-                        v1, v2, v3 = int(t.get("v1")), int(t.get("v2")), int(t.get("v3"))
-                        p1, p2, p3 = verts_arr[v1], verts_arr[v2], verts_arr[v3]
-                        # Signed tetrahedron volume relative to the origin
-                        total_volume_mm3 += np.dot(p1, np.cross(p2, p3)) / 6.0
+                all_min = np.minimum(all_min, vmin)
+                all_max = np.maximum(all_max, vmax)
+                total_volume_mm3 += volume
 
     if not found_any:
         raise ValueError(
@@ -124,3 +111,72 @@ def _parse_3mf(path: str) -> tuple[tuple[float, float, float], float]:
 
     dims_mm = tuple(float(d) for d in (all_max - all_min))
     return dims_mm, total_volume_mm3
+
+
+def _parse_model_stream(fileobj):
+    """
+    Streams a single .model XML file with iterparse, clearing each element
+    once processed so memory stays roughly proportional to one mesh's
+    vertex buffer at a time, not the whole document.
+    """
+    def local(tag):
+        return tag.rsplit("}", 1)[-1]
+
+    vmin = np.array([np.inf, np.inf, np.inf])
+    vmax = np.array([-np.inf, -np.inf, -np.inf])
+    total_volume = 0.0
+    found = False
+    verts: list[tuple[float, float, float]] = []
+    verts_arr = np.empty((0, 3))
+    in_mesh = False
+
+    for event, elem in ET.iterparse(fileobj, events=("start", "end")):
+        tag = local(elem.tag)
+
+        if event == "start" and tag == "mesh":
+            in_mesh = True
+            verts = []
+            continue
+
+        if not in_mesh:
+            if event == "end":
+                elem.clear()
+            continue
+
+        if event == "end" and tag == "vertex":
+            verts.append((float(elem.get("x")), float(elem.get("y")), float(elem.get("z"))))
+            elem.clear()
+            if len(verts) > MAX_VERTICES_PER_MESH:
+                raise ValueError(
+                    f"This 3D file has an extremely dense mesh (over "
+                    f"{MAX_VERTICES_PER_MESH:,} vertices in one part). "
+                    f"Please decimate/simplify it in your slicer or CAD "
+                    f"tool before sending -- this is a memory safety limit "
+                    f"on the free hosting tier, not a bug."
+                )
+
+        elif event == "end" and tag == "vertices":
+            elem.clear()
+            if verts:
+                verts_arr = np.array(verts, dtype=np.float64)
+                found = True
+                vmin = np.minimum(vmin, verts_arr.min(axis=0))
+                vmax = np.maximum(vmax, verts_arr.max(axis=0))
+            verts = []  # free the raw list now that we have the numpy array
+
+        elif event == "end" and tag == "triangle":
+            v1, v2, v3 = int(elem.get("v1")), int(elem.get("v2")), int(elem.get("v3"))
+            if len(verts_arr) > max(v1, v2, v3):
+                p1, p2, p3 = verts_arr[v1], verts_arr[v2], verts_arr[v3]
+                total_volume += np.dot(p1, np.cross(p2, p3)) / 6.0
+            elem.clear()
+
+        elif event == "end" and tag == "mesh":
+            in_mesh = False
+            verts_arr = np.empty((0, 3))
+            elem.clear()
+
+        elif event == "end":
+            elem.clear()
+
+    return found, vmin, vmax, total_volume
