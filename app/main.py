@@ -1,3 +1,4 @@
+import gc
 import logging
 import os
 import re
@@ -72,6 +73,12 @@ async def receive_update(request: Request):
                 log.exception("Even the error message failed to send")
         persist()
         return {"ok": True}
+    finally:
+        # Photo/video/3D-file handling all build byte buffers in memory for
+        # this request -- force them released right away instead of waiting
+        # for Python's next GC cycle, since the free-tier host is memory-
+        # capped and the next request could arrive immediately.
+        gc.collect()
 
 
 async def _handle_message(msg: dict, chat_id: int):

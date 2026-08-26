@@ -10,6 +10,8 @@ the website.
 """
 import zipfile
 import xml.etree.ElementTree as ET
+import array
+import gc
 import numpy as np
 from stl import mesh
 
@@ -22,18 +24,35 @@ DEFAULT_INFILL_PCT = 20  # assume prints are not fully solid
 # decompress or parse into something far larger in memory than its file
 # size suggests -- this stops pathologically dense meshes from OOM-crashing
 # the whole service before that happens.
-MAX_VERTICES_PER_MESH = 400_000
+#
+# 2,000,000 with the array.array-based vertex storage below uses roughly
+# the same real memory the old 400,000-with-Python-tuples version did (the
+# switch to array.array cut per-vertex memory ~6x). Sized to comfortably
+# cover lithophanes (one vertex per source-image pixel, easily 1-2M+) while
+# still failing safely on truly pathological files instead of OOM-crashing.
+# If real usage still hits this, lower it back down rather than raise it
+# further -- Render's free tier is a hard 512MB ceiling either way.
+MAX_VERTICES_PER_MESH = 2_000_000
 
 
 def analyze_model(path: str, filename: str) -> dict:
-    """Dispatches to the right parser based on file extension."""
+    """
+    Dispatches to the right parser based on file extension. Explicitly
+    forces garbage collection afterward -- mesh parsing can build sizeable
+    temporary numpy arrays, and on a memory-capped free-tier host we want
+    those released immediately rather than waiting for Python's normal GC
+    cycle, since the next request could arrive before that happens.
+    """
     lower = filename.lower()
-    if lower.endswith(".stl"):
-        dims_mm, volume_mm3 = _parse_stl(path)
-    elif lower.endswith(".3mf"):
-        dims_mm, volume_mm3 = _parse_3mf(path)
-    else:
-        raise ValueError(f"Unsupported 3D file type: {filename}")
+    try:
+        if lower.endswith(".stl"):
+            dims_mm, volume_mm3 = _parse_stl(path)
+        elif lower.endswith(".3mf"):
+            dims_mm, volume_mm3 = _parse_3mf(path)
+        else:
+            raise ValueError(f"Unsupported 3D file type: {filename}")
+    finally:
+        gc.collect()
 
     volume_cm3 = abs(volume_mm3) / 1000.0  # mm^3 -> cm^3
     effective_volume_cm3 = volume_cm3 * (DEFAULT_INFILL_PCT / 100.0)
@@ -118,6 +137,14 @@ def _parse_model_stream(fileobj):
     Streams a single .model XML file with iterparse, clearing each element
     once processed so memory stays roughly proportional to one mesh's
     vertex buffer at a time, not the whole document.
+
+    Vertex coordinates are accumulated in array.array('d') (raw C doubles,
+    ~8 bytes/value with no per-object overhead) rather than a Python list of
+    tuples (~45+ bytes per float once tuple/object overhead is counted).
+    That's roughly a 5-6x memory reduction for the vertex buffer, which is
+    what let MAX_VERTICES_PER_MESH be raised safely -- lithophanes in
+    particular can easily hit 1-2M+ vertices (one per pixel of the source
+    image), far more than typical decorative prints.
     """
     def local(tag):
         return tag.rsplit("}", 1)[-1]
@@ -126,7 +153,9 @@ def _parse_model_stream(fileobj):
     vmax = np.array([-np.inf, -np.inf, -np.inf])
     total_volume = 0.0
     found = False
-    verts: list[tuple[float, float, float]] = []
+    xs = array.array("d")
+    ys = array.array("d")
+    zs = array.array("d")
     verts_arr = np.empty((0, 3))
     in_mesh = False
 
@@ -135,7 +164,7 @@ def _parse_model_stream(fileobj):
 
         if event == "start" and tag == "mesh":
             in_mesh = True
-            verts = []
+            xs, ys, zs = array.array("d"), array.array("d"), array.array("d")
             continue
 
         if not in_mesh:
@@ -144,25 +173,32 @@ def _parse_model_stream(fileobj):
             continue
 
         if event == "end" and tag == "vertex":
-            verts.append((float(elem.get("x")), float(elem.get("y")), float(elem.get("z"))))
+            xs.append(float(elem.get("x")))
+            ys.append(float(elem.get("y")))
+            zs.append(float(elem.get("z")))
             elem.clear()
-            if len(verts) > MAX_VERTICES_PER_MESH:
+            if len(xs) > MAX_VERTICES_PER_MESH:
                 raise ValueError(
                     f"This 3D file has an extremely dense mesh (over "
-                    f"{MAX_VERTICES_PER_MESH:,} vertices in one part). "
-                    f"Please decimate/simplify it in your slicer or CAD "
-                    f"tool before sending -- this is a memory safety limit "
-                    f"on the free hosting tier, not a bug."
+                    f"{MAX_VERTICES_PER_MESH:,} vertices in one part -- "
+                    f"lithophanes and highly detailed sculpts are the usual "
+                    f"cause). Please decimate/simplify it in your slicer "
+                    f"or CAD tool before sending -- this is a memory "
+                    f"safety limit on the free hosting tier, not a bug."
                 )
 
         elif event == "end" and tag == "vertices":
             elem.clear()
-            if verts:
-                verts_arr = np.array(verts, dtype=np.float64)
+            if len(xs) > 0:
+                verts_arr = np.column_stack([
+                    np.frombuffer(xs, dtype=np.float64),
+                    np.frombuffer(ys, dtype=np.float64),
+                    np.frombuffer(zs, dtype=np.float64),
+                ])
                 found = True
                 vmin = np.minimum(vmin, verts_arr.min(axis=0))
                 vmax = np.maximum(vmax, verts_arr.max(axis=0))
-            verts = []  # free the raw list now that we have the numpy array
+            xs, ys, zs = array.array("d"), array.array("d"), array.array("d")  # free the raw buffers
 
         elif event == "end" and tag == "triangle":
             v1, v2, v3 = int(elem.get("v1")), int(elem.get("v2")), int(elem.get("v3"))
