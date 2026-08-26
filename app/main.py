@@ -293,17 +293,25 @@ async def _handle_message(msg: dict, chat_id: int):
                 return {"ok": True}
 
             try:
-                if draft.images:
-                    images_bytes = _read_files(draft.images)
-                    draft.generated = listing.generate_listing(
-                        images_bytes, text, edit_instruction=text, previous=draft.generated,
-                        model_stats=draft.stl_stats,
-                    )
-                else:
+                images_bytes = _read_files(draft.images) if draft.images else []
+                draft.generated = listing.generate_listing(
+                    images_bytes, text, edit_instruction=text, previous=draft.generated,
+                    model_stats=draft.stl_stats,
+                )
+            except Exception as ai_error:
+                # Both AI providers genuinely failed (e.g. rate limited) --
+                # fall back to simple keyword parsing rather than leaving
+                # the user stuck, but only for the few patterns it can
+                # actually handle.
+                try:
                     draft.generated = _apply_text_edit_without_ai(draft.generated, text)
-            except Exception as e:
-                await telegram.send_text(chat_id, str(e) or "Couldn't process that change — try rephrasing it.")
-                return {"ok": True}
+                except Exception:
+                    await telegram.send_text(
+                        chat_id,
+                        f"AI is unavailable right now ({ai_error}). Try again in a moment, "
+                        f"or a simple edit like 'change price to 999'.",
+                    )
+                    return {"ok": True}
             await telegram.send_text(
                 chat_id,
                 _format_summary(draft.generated, draft.stl_stats, draft.video_path)
