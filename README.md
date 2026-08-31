@@ -20,12 +20,20 @@ an auto-drafted product listing, reply "yes" to publish it to
 - `/reset` clears whatever's in progress — use this if the bot ever seems
   stuck or unresponsive.
 - `/help` shows all commands.
+- `/generate` — after sending photo(s), skip typing a description and let
+  the AI write one straight from the images alone.
 - Every message is wrapped in error handling — a crash anywhere sends you a
   message explaining what broke instead of going silent.
 - In-progress drafts are saved to disk after every message, so if the free
   Render instance restarts mid-flow (e.g. waking from sleep), you don't lose
   your progress. This does NOT survive a fresh deploy — only mid-session
   restarts.
+- Duplicate-delivery protection: Telegram retries a webhook update if it
+  doesn't get a fast reply (network blips, a Render restart, anything).
+  Without tracking that, a retry storm can reprocess the same message
+  hundreds of times and block newer messages behind it. The bot now tracks
+  the last processed `update_id` and instantly skips anything already
+  handled, so a network hiccup can't turn into a runaway repeat loop.
 
 ## Managing existing products
 

@@ -7,7 +7,7 @@ import tempfile
 from fastapi import FastAPI, Request, Response
 
 from . import telegram, listing, model_utils, pricing, django_client
-from .state import get_draft, clear_draft, persist
+from .state import get_draft, clear_draft, persist, get_last_update_id, set_last_update_id
 
 log = logging.getLogger(__name__)
 app = FastAPI()
@@ -31,7 +31,8 @@ TELEGRAM_MAX_BYTES = 20 * 1024 * 1024  # hard limit on Telegram's Bot API
 HELP_TEXT = (
     "*Add a new product:*\n"
     "Send photo(s), optionally an .stl/.3mf file and a video, then a short "
-    "description. Reply 'yes' to publish.\n\n"
+    "description -- or just type /generate to have the AI write one from "
+    "the photos alone. Reply 'yes' to publish.\n\n"
     "*Manage existing products:*\n"
     "/list [search] — see products with their IDs\n"
     "/edit <id> — change an existing product\n"
@@ -51,6 +52,18 @@ async def receive_update(request: Request):
     chat_id = None
     try:
         body = await request.json()
+
+        # Deduplicate BEFORE any processing. Telegram redelivers the same
+        # update_id if it doesn't get a fast 200 back (network blips, slow
+        # AI calls, a host restart -- anything). Marking it seen up front,
+        # not after successful processing, means even a crash mid-request
+        # can't turn into a reprocessing loop.
+        update_id = body.get("update_id")
+        if update_id is not None:
+            if update_id <= get_last_update_id():
+                return {"ok": True}  # already handled (or in progress) -- skip silently
+            set_last_update_id(update_id)
+
         msg = body.get("message")
         if not msg:
             return {"ok": True}  # edited messages, other update types -> ignore
@@ -104,6 +117,20 @@ async def _handle_message(msg: dict, chat_id: int):
         await telegram.send_text(chat_id, HELP_TEXT)
         return {"ok": True}
 
+    if "text" in msg and msg["text"].strip().lower() == "/generate":
+        if not draft.images:
+            await telegram.send_text(chat_id, "Send at least one product photo first, then /generate.")
+            return {"ok": True}
+        try:
+            images_bytes = _read_files(draft.images)
+            draft.generated = listing.generate_listing(images_bytes, "", model_stats=draft.stl_stats)
+        except Exception:
+            await telegram.send_text(chat_id, "Both AI providers failed just now — try /generate again in a moment.")
+            return {"ok": True}
+        draft.status = "awaiting_confirmation"
+        await telegram.send_text(chat_id, _format_summary(draft.generated, draft.stl_stats, draft.video_path))
+        return {"ok": True}
+
     # --- Photo received: stash it and keep collecting ---
     if "photo" in msg:
         file_id = msg["photo"][-1]["file_id"]  # last = largest size
@@ -119,7 +146,8 @@ async def _handle_message(msg: dict, chat_id: int):
         await telegram.send_text(
             chat_id,
             f"Got photo #{len(draft.images)}. Send more, the STL/3MF file, "
-            f"a product video, or a short description whenever you're ready.",
+            f"a product video, a short description, or /generate to have "
+            f"the AI write one from the photos alone.",
         )
         return {"ok": True}
 

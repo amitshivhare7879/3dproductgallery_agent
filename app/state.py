@@ -71,3 +71,31 @@ def get_draft(sender: str) -> ProductDraft:
 def clear_draft(sender: str) -> None:
     _drafts.pop(sender, None)
     persist()
+
+
+# --- Update-ID deduplication ---
+# Telegram retries a webhook delivery (the SAME update_id) if it doesn't get
+# a fast 200 OK -- network blips, slow AI calls, a Render restart, anything.
+# Without tracking what's already been handled, a retry storm reprocesses
+# the same message hundreds of times (exactly what happened when a Render
+# network hiccup delayed our replies). Since Telegram's update_id is
+# monotonically increasing per bot, remembering the highest one we've
+# already started processing lets us skip every redelivery of it instantly
+# -- no AI calls, no Telegram calls, just an early return.
+DEDUPE_PATH = os.environ.get("UPDATE_DEDUPE_PATH", "/tmp/bot_last_update_id.txt")
+
+
+def get_last_update_id() -> int:
+    try:
+        with open(DEDUPE_PATH) as f:
+            return int(f.read().strip())
+    except Exception:
+        return 0
+
+
+def set_last_update_id(update_id: int) -> None:
+    try:
+        with open(DEDUPE_PATH, "w") as f:
+            f.write(str(update_id))
+    except Exception as e:
+        log.warning("Couldn't persist last update id: %s", e)

@@ -2,9 +2,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
+*.pyd
 
 # Distribution / packaging
 .Python
@@ -26,7 +25,7 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# PyInstaller
+# PyInstaller / PyOxidizer
 *.manifest
 *.spec
 
@@ -34,7 +33,7 @@ MANIFEST
 pip-log.txt
 pip-delete-this-directory.txt
 
-# Unit test / coverage reports
+# Unit test / coverage / linting caches
 htmlcov/
 .tox/
 .nox/
@@ -47,6 +46,10 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.pyre/
 cover/
 
 # Environments & Virtual Envs
@@ -60,22 +63,56 @@ env.bak/
 venv.bak/
 .venv/
 
-# IDE & Editors
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-.DS_Store
-Thumbs.db
+# Bot runtime state & local cache files
+bot_drafts.json
+bot_last_update_id.txt
+*.drafts.json
 
 # Logs and databases
 *.log
+logs/
 *.sqlite
 *.sqlite3
-logs/
+*.db
 
-# Temporary / OS files
+# Temporary & media upload files
 tmp/
 temp/
+uploads/
 *.tmp
+*.bak
+
+# IDEs & Code Editors
+.idea/
+.vscode/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+.cursor/
+.fleet/
+*.swp
+*.swo
+*~
+
+# Operating System files
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# Sensitive keys & certificates
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
