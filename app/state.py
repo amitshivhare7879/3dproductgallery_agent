@@ -31,6 +31,7 @@ class ProductDraft:
     generated: Optional[dict] = None                    # AI output (name, description, etc.)
     status: str = "collecting"                          # collecting | awaiting_confirmation | editing | confirming_delete
     edit_target_id: Optional[int] = None                 # set when editing/deleting an existing product
+    manual_price: Optional[float] = None                  # explicit price the seller typed, overrides weight-based calc
 
 
 _drafts: dict[str, ProductDraft] = {}

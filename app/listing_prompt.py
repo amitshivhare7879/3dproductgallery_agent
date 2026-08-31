@@ -7,11 +7,12 @@ CATEGORY_CHOICES = ["Electronics", "Accessories", "Home", "Fashion", "Toys", "Ro
 
 PROMPT_TEMPLATE = """You are helping fill out a product listing for
 3dproductgallery.in, a store selling 3D-printed products. Based on the
-attached photo(s) and the seller's short note, produce a JSON object with
+attached photo(s) and the seller's note, produce a JSON object with
 exactly these fields:
 
 - name: short, catchy product name (max 100 chars)
-- description: 2-4 sentence customer-facing description. {dims_instruction}
+- description: customer-facing description. {length_instruction}
+  {dims_instruction} {quantity_instruction}
 - category: MUST be exactly one of: {categories}
 - suggested_price: your best-guess price in INR (integer, no currency symbol)
   based on what similar 3D-printed items sell for. {price_instruction}
@@ -55,6 +56,25 @@ def build_prompt(note: str, edit_instruction: str | None, previous: dict | None,
         dims_instruction = "No 3D file was provided, so do not state specific dimensions."
         price_instruction = "No weight data is available, so this estimate will be used directly."
 
+    note_word_count = len((note or "").split())
+    if note_word_count > 40:
+        length_instruction = (
+            "The seller wrote a long, detailed note -- DO NOT compress it "
+            "into a couple of generic sentences. Rewrite it for clarity, "
+            "grammar, and flow, but preserve their key selling points, "
+            "specific details, use cases, and tone. The result should be "
+            "comparably rich and detailed to what they wrote, not a summary."
+        )
+    else:
+        length_instruction = "Keep it to 2-4 sentences, since the seller's note was brief."
+
+    quantity_instruction = (
+        "If the photo(s) show multiple identical or matching items (a set, "
+        "pair, or multi-piece design), explicitly state the quantity in "
+        "both the name and description (e.g. 'Set of 3', 'Pair of', "
+        "'2-Piece'). If it's a single item, don't mention quantity at all."
+    )
+
     return PROMPT_TEMPLATE.format(
         categories=", ".join(CATEGORY_CHOICES),
         note=note or "(no note given)",
@@ -62,6 +82,8 @@ def build_prompt(note: str, edit_instruction: str | None, previous: dict | None,
         model_info=model_info,
         dims_instruction=dims_instruction,
         price_instruction=price_instruction,
+        length_instruction=length_instruction,
+        quantity_instruction=quantity_instruction,
     )
 
 

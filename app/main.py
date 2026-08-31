@@ -128,7 +128,7 @@ async def _handle_message(msg: dict, chat_id: int):
             await telegram.send_text(chat_id, "Both AI providers failed just now — try /generate again in a moment.")
             return {"ok": True}
         draft.status = "awaiting_confirmation"
-        await telegram.send_text(chat_id, _format_summary(draft.generated, draft.stl_stats, draft.video_path))
+        await telegram.send_text(chat_id, _format_summary(draft.generated, draft.stl_stats, draft.video_path, draft.manual_price))
         return {"ok": True}
 
     # --- Photo received: stash it and keep collecting ---
@@ -320,6 +320,18 @@ async def _handle_message(msg: dict, chat_id: int):
                 await telegram.send_text(chat_id, "Cancelled, no changes saved.")
                 return {"ok": True}
 
+            # Pure price change -- handle directly, instant and exact,
+            # never left to the AI or overridden by weight-based pricing.
+            price_override = _extract_price_override(text)
+            if price_override is not None and lower.strip().startswith(("change price", "price", "update price", "set price")):
+                draft.manual_price = price_override
+                await telegram.send_text(
+                    chat_id,
+                    _format_summary(draft.generated, draft.stl_stats, draft.video_path, draft.manual_price)
+                    + "\n\n(Editing existing product — reply 'yes' to save.)",
+                )
+                return {"ok": True}
+
             try:
                 images_bytes = _read_files(draft.images) if draft.images else []
                 draft.generated = listing.generate_listing(
@@ -342,7 +354,7 @@ async def _handle_message(msg: dict, chat_id: int):
                     return {"ok": True}
             await telegram.send_text(
                 chat_id,
-                _format_summary(draft.generated, draft.stl_stats, draft.video_path)
+                _format_summary(draft.generated, draft.stl_stats, draft.video_path, draft.manual_price)
                 + "\n\n(Editing existing product — reply 'yes' to save.)",
             )
             return {"ok": True}
@@ -367,6 +379,14 @@ async def _handle_message(msg: dict, chat_id: int):
                 await telegram.send_text(chat_id, "Cancelled. Send photos to start a new product.")
                 return {"ok": True}
 
+            # Pure price change -- handle directly, instant and exact,
+            # never left to the AI or overridden by weight-based pricing.
+            price_override = _extract_price_override(text)
+            if price_override is not None and lower.strip().startswith(("change price", "price", "update price", "set price")):
+                draft.manual_price = price_override
+                await telegram.send_text(chat_id, _format_summary(draft.generated, draft.stl_stats, draft.video_path, draft.manual_price))
+                return {"ok": True}
+
             # Otherwise treat it as an edit instruction
             images_bytes = _read_files(draft.images)
             try:
@@ -377,7 +397,7 @@ async def _handle_message(msg: dict, chat_id: int):
             except Exception:
                 await telegram.send_text(chat_id, "Both AI providers failed just now — try that change again in a moment.")
                 return {"ok": True}
-            await telegram.send_text(chat_id, _format_summary(draft.generated, draft.stl_stats, draft.video_path))
+            await telegram.send_text(chat_id, _format_summary(draft.generated, draft.stl_stats, draft.video_path, draft.manual_price))
             return {"ok": True}
 
         # --- This text is the product note -> generate the draft now ---
@@ -397,7 +417,7 @@ async def _handle_message(msg: dict, chat_id: int):
             await telegram.send_text(chat_id, "Both AI providers failed just now — send your description again in a moment.")
             return {"ok": True}
         draft.status = "awaiting_confirmation"
-        await telegram.send_text(chat_id, _format_summary(draft.generated, draft.stl_stats, draft.video_path))
+        await telegram.send_text(chat_id, _format_summary(draft.generated, draft.stl_stats, draft.video_path, draft.manual_price))
         return {"ok": True}
 
     return {"ok": True}
@@ -423,6 +443,18 @@ def _read_files(paths: list[str]) -> list[bytes]:
         with open(p, "rb") as f:
             data.append(f.read())
     return data
+
+
+def _extract_price_override(instruction: str) -> float | None:
+    """
+    Detects an explicit price change like 'change price to 149' and returns
+    the number, or None if the instruction isn't purely a price change.
+    Checked BEFORE calling the AI so a price request is always exact and
+    instant, never subject to the AI reinterpreting it -- and critically,
+    never silently overridden by the weight-based price calculation.
+    """
+    match = re.search(r"price\s*(?:to|=|:)?\s*₹?\s*(\d+(?:\.\d+)?)", instruction.lower())
+    return float(match.group(1)) if match else None
 
 
 def _apply_text_edit_without_ai(current: dict, instruction: str) -> dict:
@@ -452,10 +484,15 @@ def _apply_text_edit_without_ai(current: dict, instruction: str) -> dict:
     )
 
 
-def _format_summary(gen: dict, stl_stats: dict | None = None, video_path: str | None = None) -> str:
-    price = pricing.compute_price(stl_stats, gen.get("suggested_price"))
+def _format_summary(gen: dict, stl_stats: dict | None = None, video_path: str | None = None,
+                     manual_price: float | None = None) -> str:
+    price = pricing.compute_price(stl_stats, gen.get("suggested_price"), manual_price)
 
-    if stl_stats and stl_stats.get("weight_g"):
+    if manual_price is not None:
+        w_d_h = stl_stats["dims_cm"] if stl_stats and stl_stats.get("weight_g") else None
+        dims_line = f"Dimensions: {w_d_h[0]} x {w_d_h[1]} x {w_d_h[2]} cm\n" if w_d_h else ""
+        price_line = f"Price: ₹{price} (set manually)"
+    elif stl_stats and stl_stats.get("weight_g"):
         w, d, h = stl_stats["dims_cm"]
         dims_line = f"Dimensions: {w} x {d} x {h} cm | Weight: ~{stl_stats['weight_g']}g\n"
         price_line = f"Price: ₹{price} (computed from print weight)"

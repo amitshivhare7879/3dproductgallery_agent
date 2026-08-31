@@ -37,7 +37,7 @@ async def publish_product(draft) -> dict:
 
     gen = draft.generated or {}
     stats = draft.stl_stats or {}
-    price = compute_price(stats, gen.get("suggested_price"))
+    price = compute_price(stats, gen.get("suggested_price"), getattr(draft, "manual_price", None))
 
     data = {
         "name": gen.get("name"),
@@ -84,8 +84,9 @@ async def edit_product(product_id: int, draft) -> dict:
         data["description"] = gen["description"]
     if gen.get("category"):
         data["category"] = gen["category"]
-    if gen.get("suggested_price") is not None or stats.get("weight_g"):
-        data["price"] = compute_price(stats, gen.get("suggested_price"))
+    manual_price = getattr(draft, "manual_price", None)
+    if gen.get("suggested_price") is not None or stats.get("weight_g") or manual_price is not None:
+        data["price"] = compute_price(stats, gen.get("suggested_price"), manual_price)
 
     files = _build_files(draft)
 
