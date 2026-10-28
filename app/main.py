@@ -180,11 +180,34 @@ async def _handle_message(msg: dict, chat_id: int):
             return {"ok": True}
         stats = draft.stl_stats
         w, d, h = stats["dims_cm"]
+        mat = stats.get("material", "PLA")
+        inf = stats.get("infill_pct", 20)
+        bd = stats.get("breakdown", {})
+
+        if stats.get("source") == "slicer_metadata":
+            src_note = " (exact from slicer metadata)"
+            bd_text = f"Slicer Weight: {stats['weight_g']}g"
+        else:
+            src_note = ""
+            sup_text = f"{bd.get('support_g', 0)}g" if stats.get("has_overhangs") and stats.get("supports_enabled") else "0g"
+            bd_text = (
+                f"Breakdown: Shell ~{bd.get('shell_g', 0)}g | Infill ~{bd.get('infill_g', 0)}g | "
+                f"Supports ~{sup_text} | Waste ~{bd.get('waste_g', 0)}g"
+            )
+
+        sup_status = "detected & added" if stats.get("has_overhangs") else "none needed"
+        price_preview = pricing.compute_price(stats, None)
+
         await telegram.send_text(
             chat_id,
-            f"Got the {suffix.upper().lstrip('.')} file. Dimensions {w} x {d} x {h} cm, "
-            f"estimated weight ~{stats['weight_g']}g. Send a short description "
-            f"when ready, e.g. 'red dragon miniature, fantasy category'.",
+            f"Got the {suffix.upper().lstrip('.')} file!\n\n"
+            f"📐 Dimensions: {w} x {d} x {h} cm\n"
+            f"⚖️ Estimated Weight: ~{stats['weight_g']}g{src_note}\n"
+            f"   ({mat} filament, {inf}% infill, supports: {sup_status})\n"
+            f"   {bd_text}\n"
+            f"💰 Est. Price: ₹{price_preview} (at ₹{pricing.PRICE_PER_GRAM_INR}/g)\n\n"
+            f"💡 Tip: You can reply 'infill 15%', 'material petg', or 'no supports' to adjust settings anytime.\n"
+            f"Send a short description when ready, e.g. 'red dragon miniature, fantasy category'.",
         )
         return {"ok": True}
 
@@ -298,6 +321,49 @@ async def _handle_message(msg: dict, chat_id: int):
             else:
                 await telegram.send_text(chat_id, "Cancelled, nothing deleted.")
             clear_draft(sender)
+            return {"ok": True}
+
+        # --- 3D Print Settings adjustment (e.g. 'infill 15%', 'material petg', 'no supports') ---
+        settings_adj = _extract_3d_settings(text)
+        if settings_adj and draft.stl_stats:
+            draft.stl_stats = model_utils.recalculate_weight(
+                draft.stl_stats,
+                material=settings_adj.get("material"),
+                infill_pct=settings_adj.get("infill_pct"),
+                supports_enabled=settings_adj.get("supports_enabled"),
+            )
+            stats = draft.stl_stats
+            mat = stats.get("material", "PLA")
+            inf = stats.get("infill_pct", 20)
+            sup_str = "Enabled" if stats.get("supports_enabled") else "Disabled"
+            bd = stats.get("breakdown", {})
+            new_price = pricing.compute_price(
+                stats,
+                draft.generated.get("suggested_price") if draft.generated else None,
+                draft.manual_price,
+            )
+
+            sup_text = f"{bd.get('support_g', 0)}g" if stats.get("has_overhangs") and stats.get("supports_enabled") else "0g"
+            bd_str = (
+                f"Shell ~{bd.get('shell_g', 0)}g | Infill ~{bd.get('infill_g', 0)}g | "
+                f"Supports ~{sup_text} | Waste ~{bd.get('waste_g', 0)}g"
+            )
+
+            msg = (
+                f"⚙️ *Updated 3D Print Settings:*\n"
+                f"• Material: {mat} ({model_utils.MATERIAL_DENSITIES.get(mat, 1.24)} g/cm³)\n"
+                f"• Infill: {inf}%\n"
+                f"• Supports: {sup_str}\n\n"
+                f"⚖️ *New Weight:* ~{stats['weight_g']}g\n"
+                f"   ({bd_str})\n"
+                f"💰 *New Price:* ₹{new_price} (at ₹{pricing.PRICE_PER_GRAM_INR}/g)"
+            )
+
+            if draft.status in ("awaiting_confirmation", "editing") and draft.generated:
+                msg += "\n\n" + _format_summary(draft.generated, draft.stl_stats, draft.video_path, draft.manual_price)
+            elif not draft.images:
+                msg += "\n\nSend product photo(s) and description when ready."
+            await telegram.send_text(chat_id, msg)
             return {"ok": True}
 
         # --- Editing an existing product ---
@@ -445,6 +511,41 @@ def _read_files(paths: list[str]) -> list[bytes]:
     return data
 
 
+def _extract_3d_settings(instruction: str) -> dict | None:
+    """
+    Detects 3D print parameter adjustments like:
+    - Infill: 'infill 15%', '25% infill', 'infill: 30'
+    - Material: 'material petg', 'pla filament', 'use abs', 'tpu'
+    - Supports: 'no supports', 'support off', 'supports on', 'with supports'
+    Returns dict of recognized updates or None.
+    """
+    lower = instruction.strip().lower()
+    updates = {}
+
+    # Infill percentage
+    infill_match = re.search(r"\b(?:infill\s*(?:to|=|:)?\s*(\d{1,3})%?|(\d{1,3})%\s*infill)\b", lower)
+    if infill_match:
+        val = int(infill_match.group(1) or infill_match.group(2))
+        if 0 <= val <= 100:
+            updates["infill_pct"] = val
+
+    # Supports toggle
+    if re.search(r"\b(?:no\s+supports?|supports?\s+off|without\s+supports?|disable\s+supports?)\b", lower):
+        updates["supports_enabled"] = False
+    elif re.search(r"\b(?:supports?\s+on|with\s+supports?|enable\s+supports?|need\s+supports?)\b", lower):
+        updates["supports_enabled"] = True
+
+    # Material
+    for mat in model_utils.MATERIAL_DENSITIES.keys():
+        mat_lower = mat.lower().replace("_", " ")
+        pattern = rf"\b(?:material\s*(?:to|=|:)?\s*{re.escape(mat_lower)}|filament\s*(?:to|=|:)?\s*{re.escape(mat_lower)}|{re.escape(mat_lower)}\s+filament|use\s+{re.escape(mat_lower)}|^{re.escape(mat_lower)}$)\b"
+        if re.search(pattern, lower):
+            updates["material"] = mat
+            break
+
+    return updates if updates else None
+
+
 def _extract_price_override(instruction: str) -> float | None:
     """
     Detects an explicit price change like 'change price to 149' and returns
@@ -494,8 +595,11 @@ def _format_summary(gen: dict, stl_stats: dict | None = None, video_path: str | 
         price_line = f"Price: ₹{price} (set manually)"
     elif stl_stats and stl_stats.get("weight_g"):
         w, d, h = stl_stats["dims_cm"]
-        dims_line = f"Dimensions: {w} x {d} x {h} cm | Weight: ~{stl_stats['weight_g']}g\n"
-        price_line = f"Price: ₹{price} (computed from print weight)"
+        mat = stl_stats.get("material", "PLA")
+        inf = stl_stats.get("infill_pct", 20)
+        sup = "w/ supports" if stl_stats.get("supports_enabled", True) and stl_stats.get("has_overhangs") else "no supports"
+        dims_line = f"Dimensions: {w} x {d} x {h} cm | Weight: ~{stl_stats['weight_g']}g ({mat}, {inf}% infill, {sup})\n"
+        price_line = f"Price: ₹{price} (computed from print weight @ ₹{pricing.PRICE_PER_GRAM_INR}/g)"
     else:
         dims_line = ""
         price_line = f"Suggested price: ₹{price} (AI's guess, no 3D file to go on)"
@@ -509,5 +613,5 @@ def _format_summary(gen: dict, stl_stats: dict | None = None, video_path: str | 
         f"{video_line}"
         f"Category: {gen.get('category')}\n"
         f"{price_line}\n\n"
-        f"Reply 'yes' to publish, or describe a change (e.g. 'change price to 899')."
+        f"Reply 'yes' to publish, or describe a change (e.g. 'change price to 899', 'infill 15%')."
     )

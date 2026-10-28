@@ -37,10 +37,11 @@ def build_prompt(note: str, edit_instruction: str | None, previous: dict | None,
 
     if model_stats and model_stats.get("dims_cm"):
         w, d, h = model_stats["dims_cm"]
+        mat = model_stats.get("material", "PLA")
         model_info = (
             f"\nMeasured from the actual 3D model file: dimensions are "
             f"{w} x {d} x {h} cm (W x D x H), estimated print weight "
-            f"{model_stats.get('weight_g', '?')}g."
+            f"{model_stats.get('weight_g', '?')}g ({mat})."
         )
         dims_instruction = (
             f"You MUST mention the exact dimensions ({w} x {d} x {h} cm) "

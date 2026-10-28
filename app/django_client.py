@@ -6,6 +6,11 @@ from .pricing import compute_price
 DJANGO_API_BASE_URL = os.environ["DJANGO_API_BASE_URL"]
 DJANGO_PUBLISH_SECRET = os.environ["DJANGO_PUBLISH_SECRET"]
 
+DEFAULT_HEADERS = {
+    "X-Publish-Secret": DJANGO_PUBLISH_SECRET,
+    "User-Agent": "TelegramProductBot/1.0",
+}
+
 
 def _build_files(draft) -> list:
     """
@@ -33,7 +38,7 @@ async def publish_product(draft) -> dict:
     in the Django project (hmac.compare_digest on the server side).
     """
     url = f"{DJANGO_API_BASE_URL}/api/products/create"
-    headers = {"X-Publish-Secret": DJANGO_PUBLISH_SECRET}
+    headers = DEFAULT_HEADERS
 
     gen = draft.generated or {}
     stats = draft.stl_stats or {}
@@ -55,7 +60,7 @@ async def publish_product(draft) -> dict:
 
 async def list_products(query: str = "") -> dict:
     url = f"{DJANGO_API_BASE_URL}/api/products/list"
-    headers = {"X-Publish-Secret": DJANGO_PUBLISH_SECRET}
+    headers = DEFAULT_HEADERS
     async with httpx.AsyncClient(follow_redirects=True) as client:
         r = await client.get(url, headers=headers, params={"q": query} if query else {}, timeout=30)
         r.raise_for_status()
@@ -64,7 +69,7 @@ async def list_products(query: str = "") -> dict:
 
 async def get_product(product_id: int) -> dict:
     url = f"{DJANGO_API_BASE_URL}/api/products/get/{product_id}"
-    headers = {"X-Publish-Secret": DJANGO_PUBLISH_SECRET}
+    headers = DEFAULT_HEADERS
     async with httpx.AsyncClient(follow_redirects=True) as client:
         r = await client.get(url, headers=headers, timeout=30)
         r.raise_for_status()
@@ -73,7 +78,7 @@ async def get_product(product_id: int) -> dict:
 
 async def edit_product(product_id: int, draft) -> dict:
     url = f"{DJANGO_API_BASE_URL}/api/products/edit/{product_id}"
-    headers = {"X-Publish-Secret": DJANGO_PUBLISH_SECRET}
+    headers = DEFAULT_HEADERS
 
     gen = draft.generated or {}
     stats = draft.stl_stats or {}
@@ -98,7 +103,7 @@ async def edit_product(product_id: int, draft) -> dict:
 
 async def delete_product(product_id: int) -> dict:
     url = f"{DJANGO_API_BASE_URL}/api/products/delete/{product_id}"
-    headers = {"X-Publish-Secret": DJANGO_PUBLISH_SECRET}
+    headers = DEFAULT_HEADERS
     async with httpx.AsyncClient(follow_redirects=True) as client:
         r = await client.post(url, headers=headers, timeout=30)
         r.raise_for_status()
